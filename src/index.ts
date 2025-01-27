@@ -24,6 +24,9 @@ const fdeb = new u8([0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8,
 // code length index map
 const clim = new u8([16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15]);
 
+const f4 = 0xFFFF; // uint16 max value 65535 - 2 bytes of ones
+const f8 = 0xFFFFFFFF; // uint32 max value 4294967295 - 4 bytes of ones
+
 // get base, reverse index map from extra bits
 const freb = (eb: Uint8Array, start: number) => {
   const b = new u16(31);
@@ -733,9 +736,9 @@ const dflt = (dat: Uint8Array, lvl: number, plvl: number, pre: number, post: num
       st.h = head, st.p = prev, st.i = i, st.w = wi;
     }
   } else {
-    for (let i = st.w || 0; i < s + lst; i += 65535) {
+    for (let i = st.w || 0; i < s + lst; i += f4) {
       // end
-      let e = i + 65535;
+      let e = i + f4;
       if (e >= s) {
         // write final block
         w[(pos / 8) | 0] = lst;
@@ -1183,9 +1186,13 @@ const b4 = (d: Uint8Array, b: number) => (d[b] | (d[b + 1] << 8) | (d[b + 2] << 
 
 const b8 = (d: Uint8Array, b: number) => b4(d, b) + (b4(d, b + 4) * 4294967296);
 
-// write bytes
+// write bytes, works only for values <= uint32
 const wbytes = (d: Uint8Array, b: number, v: number) => {
   for (; v; ++b) d[b] = v, v >>>= 8;
+}
+
+const wbytes64 = (d: Uint8Array, b: number, v: number) => {
+  for (; v; v /= 256) v -= d[b++] = v % 256;
 }
 
 // gzip header
@@ -2704,16 +2711,23 @@ const dbf = (l: number) => l == 1 ? 3 : l < 6 ? 2 : l == 9 ? 1 : 0;
 const slzh = (d: Uint8Array, b: number) => b + 30 + b2(d, b + 26) + b2(d, b + 28);
 
 // read zip header
-const zh = (d: Uint8Array, b: number, z: boolean) => {
-  const fnl = b2(d, b + 28), fn = strFromU8(d.subarray(b + 46, b + 46 + fnl), !(b2(d, b + 8) & 2048)), es = b + 46 + fnl, bs = b4(d, b + 20);
-  const [sc, su, off] = z && bs == 4294967295 ? z64e(d, es) : [bs, b4(d, b + 24), b4(d, b + 42)];
-  return [b2(d, b + 10), sc, su, fn, es + b2(d, b + 30) + b2(d, b + 32), off] as const;
+const zh = (d: Uint8Array, b: number) => {
+  const fnl = b2(d, b + 28), fn = strFromU8(d.subarray(b + 46, b + 46 + fnl), !(b2(d, b + 8) & 2048)), es = b + 46 + fnl, exl = b2(d, b + 30);
+  let su = b4(d, b + 24), sc: number | undefined, lo: number | undefined;
+  if (su == f8) {
+    const ef = z64e(d, es, exl);
+    if (ef) su = ef(su, 4), sc = ef(sc, 12), lo = ef(lo, 20);
+  }
+  return [b2(d, b + 10), sc ?? b4(d, b + 20), su, fn, es + exl + b2(d, b + 32), lo ?? b4(d, b + 42)] as const;
 }
 
 // read zip64 extra field
-const z64e = (d: Uint8Array, b: number) => {
-  for (; b2(d, b) != 1; b += 4 + b2(d, b + 2));
-  return [b8(d, b + 12), b8(d, b + 4), b8(d, b + 20)] as const;
+const z64e = (d: Uint8Array, b: number, exl: number) => {
+  let e = b + exl, id: number, l: number;
+  for (; b < e; b += l + 4) {
+    id = b2(d, b), l = b2(d, b + 2);
+    if (id == 1) return <T>(v: T, o: 4 | 12 | 20) => l > o ? b8(d, b + o) : v;
+  }
 }
 
 // zip header file
@@ -2725,7 +2739,7 @@ const exfl = (ex?: ZHF['extra']) => {
   if (ex) {
     for (const k in ex) {
       const l = ex[k].length;
-      if (l > 65535) err(9);
+      if (l > f4) err(9);
       le += l + 4;
     }
   }
@@ -2733,50 +2747,103 @@ const exfl = (ex?: ZHF['extra']) => {
 }
 
 // write zip header
-const wzh = (d: Uint8Array, b: number, f: ZHF, fn: Uint8Array, u: boolean, c: number, ce?: number, co?: Uint8Array) => {
-  const fl = fn.length, ex = f.extra, col = co && co.length;
-  let exl = exfl(ex);
-  wbytes(d, b, ce != null ? 0x2014B50 : 0x4034B50), b += 4;
-  if (ce != null) d[b++] = 20, d[b++] = f.os;
-  d[b] = 20, b += 2; // spec compliance? what's that?
-  d[b++] = (f.flag << 1) | (c < 0 && 8), d[b++] = u && 8;
-  d[b++] = f.compression & 255, d[b++] = f.compression >> 8;
-  const dt = new Date(f.mtime == null ? Date.now() : f.mtime), y = dt.getFullYear() - 1980;
-  if (y < 0 || y > 119) err(10);
-  wbytes(d, b, (y << 25) | ((dt.getMonth() + 1) << 21) | (dt.getDate() << 16) | (dt.getHours() << 11) | (dt.getMinutes() << 5) | (dt.getSeconds() >> 1)), b += 4;
-  if (c != -1) {
-    wbytes(d, b, f.crc);
-    wbytes(d, b + 4, c < 0 ? -c - 2 : c);
-    wbytes(d, b + 8, f.size);
+const wzh = (
+  f: ZHF,
+  fn: Uint8Array, // file name
+  u: boolean, // unicode
+  c: number, // compressed size
+  ce?: number, // (central dir only) local header offset
+  co?: Uint8Array // (central dir only) comment
+) => {
+  const fnl = fn.length, col = co ? co.length : 0,
+    cdh = ce != null, // central dir header
+    s = c < 0; // streaming mode
+  let ex = f.extra,
+    sc = s ? -c - 2 : c,
+    su = f.size,
+    _sc = sc > f8,
+    _ce = ce > f8 && f8;
+  // Zip64 extra field
+  if (_sc || su > f8 || _ce) {
+    const efl = _ce ? 24 : (_sc || !cdh) ? 16 : 8, ef = new u8(efl);
+    wbytes64(ef, 0, su);
+    wbytes64(ef, 8, sc);
+    wbytes64(ef, 16, ce);
+    ex = mrg({ 1: ef }, ex), su = f8, sc = efl > 8 ? f8 : sc;
+  } else if (!cdh && f.zip64) {
+    ex = mrg({ 1: [] }, ex); // marks Data Descriptor format as Zip64
   }
-  wbytes(d, b + 12, fl);
-  wbytes(d, b + 14, exl), b += 16;
-  if (ce != null) {
-    wbytes(d, b, col);
-    wbytes(d, b + 6, f.attrs);
-    wbytes(d, b + 10, ce), b += 14;
-  }
-  d.set(fn, b);
-  b += fl;
-  if (exl) {
-    for (const k in ex) {
-      const exf = ex[k], l = exf.length;
-      wbytes(d, b, +k);
-      wbytes(d, b + 2, l);
-      d.set(exf, b + 4), b += 4 + l;
+  function w(d: Uint8Array, b: number) {
+    wbytes(d, b, cdh ? 0x2014B50 : 0x4034B50), b += 4;
+    if (cdh) d[b++] = 20, d[b++] = f.os;
+    d[b] = 20, b += 2; // spec compliance? what's that?
+    d[b++] = (f.flag << 1) | (s && 8), d[b++] = u && 8;
+    d[b++] = f.compression & 255, d[b++] = f.compression >> 8;
+    const dt = new Date(f.mtime == null ? Date.now() : f.mtime), y = dt.getFullYear() - 1980;
+    if (y < 0 || y > 119) err(10);
+    wbytes(d, b, (y << 25) | ((dt.getMonth() + 1) << 21) | (dt.getDate() << 16) | (dt.getHours() << 11) | (dt.getMinutes() << 5) | (dt.getSeconds() >> 1)), b += 4;
+    if (!s || cdh) {
+      wbytes(d, b, f.crc);
+      wbytes(d, b + 4, sc);
+      wbytes(d, b + 8, su);
     }
+    wbytes(d, b + 12, fnl);
+    wbytes(d, b + 14, w.exl), b += 16;
+    if (cdh) {
+      wbytes(d, b, col);
+      wbytes(d, b + 6, f.attrs);
+      wbytes(d, b + 10, _ce || ce), b += 14;
+    }
+    d.set(fn, b), b += fnl;
+    if (w.exl) {
+      for (const k in ex) {
+        const exf = ex[k], l = exf.length;
+        wbytes(d, b, +k);
+        wbytes(d, b + 2, l);
+        d.set(exf, b += 4), b += l;
+      }
+    }
+    if (cdh && col) d.set(co, b);
   }
-  if (col) d.set(co, b), b += col;
-  return b;
+  w.exl = exfl(ex);
+  w.l = 30 + (cdh && 16) + fnl + w.exl + (cdh && col);
+  return w;
 }
 
-// write zip footer (end of central directory)
-const wzf = (o: Uint8Array, b: number, c: number, d: number, e: number) => {
-  wbytes(o, b, 0x6054B50); // skip disk
-  wbytes(o, b + 8, c);
-  wbytes(o, b + 10, c);
-  wbytes(o, b + 12, d);
-  wbytes(o, b + 16, e);
+// write zip footer
+const wzf = (
+  fl: number, // files length
+  cdl: number, // central directory length
+  cdo: number // central directory offset
+) => {
+  const _fl = fl > f4 && f4,
+    _cdl = cdl > f8 && f8,
+    _cdo = cdo > f8 && f8,
+    z64 = _fl || _cdl || _cdo;
+  function w(d: Uint8Array, b: number) {
+    if (z64) {
+      // Zip64 end of central directory record
+      wbytes(d, b, 0x6064B50);
+      d[b + 4] = 44;
+      d[b + 12] = d[b + 14] = 45;
+      wbytes64(d, b + 24, fl);
+      wbytes64(d, b + 32, fl);
+      wbytes64(d, b + 40, cdl);
+      wbytes64(d, b + 48, cdo);
+      // Zip64 end of central directory locator
+      wbytes(d, b + 56, 0x7064B50);
+      wbytes64(d, b + 64, cdo + cdl);
+      d[(b += 76) - 4] = 1;
+    }
+    // End of central directory record
+    wbytes(d, b, 0x6054B50); // skip disk
+    wbytes(d, b + 8, _fl || fl);
+    wbytes(d, b + 10, _fl || fl);
+    wbytes(d, b + 12, _cdl || cdl);
+    wbytes(d, b + 16, _cdo || cdo);
+  }
+  w.l = z64 ? 98 : 22;
+  return w;
 }
 
 /**
@@ -2827,6 +2894,14 @@ export interface ZipInputFile extends ZipAttributes {
   flag?: number;
 
   /**
+   * Flag used to enforce the Zip64 format for Data Descriptor as described
+   * in PKZIP's APPNOTE.txt, section 4.3.9.2.
+   * Set this flag to `true` if you suspect your file will be larger than 4GB
+   * before or after compression.
+   */
+  zip64?: boolean;
+
+  /**
    * The handler to be called when data is added. After passing this stream to
    * the ZIP file object, this handler will always be defined. To call it:
    * 
@@ -2859,6 +2934,12 @@ type AsyncZipDat = ZHF & {
   m?: Uint8Array;
   // unicode
   u: boolean;
+  // local file header offset
+  o?: number;
+  // local file header
+  lh?: ReturnType<typeof wzh>;
+  // central directory header
+  ch?: ReturnType<typeof wzh>;
 };
 
 type ZipDat = AsyncZipDat & {
@@ -2879,6 +2960,7 @@ export class ZipPassThrough implements ZipInputFile {
   comment?: string;
   extra?: Record<number, Uint8Array>;
   mtime?: GzipOptions['mtime'];
+  zip64?: boolean;
   ondata: AsyncFlateStreamHandler;
   private c: CRCV;
 
@@ -2938,6 +3020,7 @@ export class ZipDeflate implements ZipInputFile {
   comment?: string;
   extra?: Record<number, Uint8Array>;
   mtime?: GzipOptions['mtime'];
+  zip64?: boolean;
   ondata: AsyncFlateStreamHandler;
   private d: Deflate;
 
@@ -2988,6 +3071,7 @@ export class AsyncZipDeflate implements ZipInputFile {
   comment?: string;
   extra?: Record<number, Uint8Array>;
   mtime?: GzipOptions['mtime'];
+  zip64?: boolean;
   ondata: AsyncFlateStreamHandler;
   private d: AsyncDeflate;
   terminate: AsyncTerminable;
@@ -3041,7 +3125,7 @@ type ZIFE = {
   r: () => void;
 };
 
-type ZipInternalFile = ZHF & ZIFE;
+type ZipInternalFile = ZHF & ZIFE & { ch?: ReturnType<typeof wzh> };
 
 // TODO: Better tree shaking
 
@@ -3074,10 +3158,10 @@ export class Zip {
       const f = strToU8(file.filename), fl = f.length;
       const com = file.comment, o = com && strToU8(com);
       const u = fl != file.filename.length || (o && (com.length != o.length));
-      const hl = fl + exfl(file.extra) + 30;
-      if (fl > 65535) this.ondata(err(11, 0, 1), null, false);
-      const header = new u8(hl);
-      wzh(header, 0, file, f, u, -1);
+      if (fl > f4) this.ondata(err(11, 0, 1), null, false);
+      const lh = wzh(file, f, u, -1);
+      const header = new u8(lh.l);
+      lh(header, 0);
       let chks: Uint8Array[] = [header];
       const pAll = () => {
         for (const chk of chks) this.ondata(null, chk, false);
@@ -3112,13 +3196,18 @@ export class Zip {
           cl += dat.length;
           chks.push(dat);
           if (final) {
-            const dd = new u8(16);
+            let z64 = file.zip64, ddl = z64 ? 24 : 16, dd = new u8(ddl);
             wbytes(dd, 0, 0x8074B50)
             wbytes(dd, 4, file.crc);
-            wbytes(dd, 8, cl);
-            wbytes(dd, 12, file.size);
+            if (z64) {
+              wbytes64(dd, 8, cl);
+              wbytes64(dd, 16, file.size);
+            } else {
+              wbytes(dd, 8, cl);
+              wbytes(dd, 12, file.size);
+            }
             chks.push(dd);
-            uf.c = cl, uf.b = hl + cl + 16, uf.crc = file.crc, uf.size = file.size;
+            uf.c = cl, uf.b = lh.l + cl + ddl, uf.crc = file.crc, uf.size = file.size;
             if (tr) uf.r();
             tr = 1;
           } else if (tr) pAll();
@@ -3151,14 +3240,19 @@ export class Zip {
   }
 
   private e() {
-    let bt = 0, l = 0, tl = 0;
-    for (const f of this.u) tl += 46 + f.f.length + exfl(f.extra) + (f.o ? f.o.length : 0);
-    const out = new u8(tl + 22);
+    let o = 0, cdl = 0;
     for (const f of this.u) {
-      wzh(out, bt, f, f.f, f.u, -f.c - 2, l, f.o);
-      bt += 46 + f.f.length + exfl(f.extra) + (f.o ? f.o.length : 0), l += f.b;
+      f.ch = wzh(f, f.f, f.u, -f.c - 2, o, f.o);
+      o += f.b, cdl += f.ch.l;
     }
-    wzf(out, bt, this.u.length, tl, l)
+    const eocd = wzf(this.u.length, cdl, o);
+    const out = new u8(cdl + eocd.l);
+    o = 0;
+    for (const f of this.u) {
+      f.ch(out, o);
+      o += f.ch.l;
+    }
+    eocd(out, o);
     this.ondata(null, out, true);
     this.d = 2;
   }
@@ -3199,7 +3293,7 @@ export function zip(data: AsyncZippable, opts: AsyncZipOptions | FlateCallback, 
   const r: FlatZippable<true> = {};
   fltn(data, '', r, opts as AsyncZipOptions);
   const k = Object.keys(r);
-  let lft = k.length, o = 0, tot = 0;
+  let lft = k.length;
   const slft = lft, files = new Array<AsyncZipDat>(lft);
   const term: AsyncTerminable[] = [];
   const tAll = () => {
@@ -3210,22 +3304,24 @@ export function zip(data: AsyncZippable, opts: AsyncZipOptions | FlateCallback, 
   }
   mt(() => { cbd = cb; });
   const cbf = () => {
-    const out = new u8(tot + 22), oe = o, cdl = tot - o;
-    tot = 0;
+    let o = 0, cdl = 0;
+    for (let i = 0; i < slft; i++) {
+      const f = files[i], l = f.c.length;
+      f.o = o;
+      f.lh = wzh(f, f.f, f.u, l);
+      f.ch = wzh(f, f.f, f.u, l, o, f.m);
+      o += f.lh.l + l, cdl += f.ch.l;
+    }
+    const eocd = wzf(slft, cdl, o);
+    const out = new u8(o + cdl + eocd.l);
     for (let i = 0; i < slft; ++i) {
       const f = files[i];
-      try {
-        const l = f.c.length;
-        wzh(out, tot, f, f.f, f.u, l);
-        const badd = 30 + f.f.length + exfl(f.extra);
-        const loc = tot + badd;
-        out.set(f.c, loc);
-        wzh(out, o, f, f.f, f.u, l, tot, f.m), o += 16 + badd + (f.m ? f.m.length : 0), tot = loc + l;
-      } catch(e) {
-        return cbd(e, null);
-      }
+      f.lh(out, f.o);
+      out.set(f.c, f.o + f.lh.l);
+      f.ch(out, o);
+      o += f.ch.l;
     }
-    wzf(out, o, files.length, cdl, oe);
+    eocd(out, o);
     cbd(null, out);
   }
   if (!lft) cbf();
@@ -3237,14 +3333,12 @@ export function zip(data: AsyncZippable, opts: AsyncZipOptions | FlateCallback, 
     c.p(file);
     const f = strToU8(fn), s = f.length;
     const com = p.comment, m = com && strToU8(com), ms = m && m.length;
-    const exl = exfl(p.extra);
     const compression = p.level == 0 ? 0 : 8;
     const cbl: FlateCallback = (e, d) => {
       if (e) {
         tAll();
         cbd(e, null);
       } else {
-        const l = d.length;
         files[i] = mrg(p, {
           size,
           crc: c.d(),
@@ -3254,12 +3348,10 @@ export function zip(data: AsyncZippable, opts: AsyncZipOptions | FlateCallback, 
           u: s != fn.length || (m && (com.length != ms)),
           compression
         });
-        o += 30 + s + exl + l;
-        tot += 76 + 2 * (s + exl) + (ms || 0) + l;
         if (!--lft) cbf();
       }
     }
-    if (s > 65535) cbl(err(11, 0, 1), null);
+    if (s > f4) cbl(err(11, 0, 1), null);
     if (!compression) cbl(null, file);
     else if (size < 160000) {
       try {
@@ -3284,40 +3376,41 @@ export function zipSync(data: Zippable, opts?: ZipOptions) {
   const r: FlatZippable<false> = {};
   const files: ZipDat[] = [];
   fltn(data, '', r, opts);
-  let o = 0;
-  let tot = 0;
+  let o = 0, cdl = 0, zd: ZipDat;
   for (const fn in r) {
     const [file, p] = r[fn];
     const compression = p.level == 0 ? 0 : 8;
     const f = strToU8(fn), s = f.length;
     const com = p.comment, m = com && strToU8(com), ms = m && m.length;
-    const exl = exfl(p.extra);
-    if (s > 65535) err(11);
+    const u = s != fn.length || (m && (com.length != ms));
+    if (s > f4) err(11);
     const d = compression ? deflateSync(file, p) : file, l = d.length;
     const c = crc();
     c.p(file);
-    files.push(mrg(p, {
+    files.push(zd = mrg(p, {
       size: file.length,
       crc: c.d(),
       c: d,
       f,
       m,
-      u: s != fn.length || (m && (com.length != ms)),
+      u,
       o,
       compression
     }));
-    o += 30 + s + exl + l;
-    tot += 76 + 2 * (s + exl) + (ms || 0) + l;
+    zd.lh = wzh(zd, f, u, l);
+    zd.ch = wzh(zd, f, u, l, o, m);
+    o += zd.lh.l + l, cdl += zd.ch.l;
   }
-  const out = new u8(tot + 22), oe = o, cdl = tot - o;
+  const eocd = wzf(files.length, cdl, o);
+  const out = new u8(o + cdl + eocd.l);
   for (let i = 0; i < files.length; ++i) {
     const f = files[i];
-    wzh(out, f.o, f, f.f, f.u, f.c.length);
-    const badd = 30 + f.f.length + exfl(f.extra);
-    out.set(f.c, f.o + badd);
-    wzh(out, o, f, f.f, f.u, f.c.length, f.o, f.m), o += 16 + badd + (f.m ? f.m.length : 0);
+    f.lh(out, f.o);
+    out.set(f.c, f.o + f.lh.l);
+    f.ch(out, o);
+    o += f.ch.l;
   }
-  wzf(out, o, files.length, cdl, oe);
+  eocd(out, o);
   return out;
 }
 
@@ -3570,16 +3663,18 @@ export class Unzip {
           f = 1, is = i;
           this.d = null;
           this.c = 0;
-          const bf = b2(buf, i + 6), cmp = b2(buf, i + 8), u = bf & 2048, dd = bf & 8, fnl = b2(buf, i + 26), es = b2(buf, i + 28);
-          if (l > i + 30 + fnl + es) {
+          const bf = b2(buf, i + 6), cmp = b2(buf, i + 8), u = bf & 2048, dd = bf & 8, fnl = b2(buf, i + 26), exl = b2(buf, i + 28);
+          if (l > i + 30 + fnl + exl) {
             const chks: Uint8Array[] = [];
             this.k.unshift(chks);
             f = 2;
             let sc = b4(buf, i + 18), su = b4(buf, i + 22);
-            const fn = strFromU8(buf.subarray(i + 30, i += 30 + fnl), !u);
-            if (sc == 4294967295) { [sc, su] = dd ? [-2] : z64e(buf, i); }
-            else if (dd) sc = -1;
-            i += es;
+            const fn = strFromU8(buf.subarray(i += 30, i += fnl), !u);
+            if (su == f8) {
+              const ef = z64e(buf, i, exl);
+              if (ef) su = ef(su, 4), sc = ef(sc, 12);
+            } else if (dd) sc = sc == f8 ? -2 : -1;
+            i += exl;
             this.c = sc;
             let d: UnzipDecoder;
             const file = {
@@ -3682,23 +3777,21 @@ export function unzip(data: Uint8Array, opts: AsyncUnzipOptions | UnzipCallback,
       cbd(err(13, 0, 1), null);
       return tAll;
     }
-  };
+  }
   let lft = b2(data, e + 8);
   if (lft) {
     let c = lft;
     let o = b4(data, e + 16);
-    let z = o == 4294967295 || c == 65535;
-    if (z) {
-      let ze = b4(data, e - 12);
-      z = b4(data, ze) == 0x6064B50;
-      if (z) {
-        c = lft = b4(data, ze + 32);
-        o = b4(data, ze + 48);
+    if (o == f8 || c == f4) {
+      let ze = b8(data, e - 12);
+      if (b4(data, ze) == 0x6064B50) {
+        c = lft = b8(data, ze + 32);
+        o = b8(data, ze + 48);
       }
     }
     const fltr = opts && (opts as AsyncUnzipOptions).filter;
     for (let i = 0; i < c; ++i) {
-      const [c, sc, su, fn, no, off] = zh(data, o, z), b = slzh(data, off);
+      const [c, sc, su, fn, no, off] = zh(data, o), b = slzh(data, off);
       o = no
       const cbl: FlateCallback = (e, d) => {
         if (e) {
@@ -3746,22 +3839,20 @@ export function unzipSync(data: Uint8Array, opts?: UnzipOptions) {
   let e = data.length - 22;
   for (; b4(data, e) != 0x6054B50; --e) {
     if (!e || data.length - e > 65558) err(13);
-  };
+  }
   let c = b2(data, e + 8);
   if (!c) return {};
   let o = b4(data, e + 16);
-  let z = o == 4294967295 || c == 65535;
-  if (z) {
-    let ze = b4(data, e - 12);
-    z = b4(data, ze) == 0x6064B50;
-    if (z) {
-      c = b4(data, ze + 32);
-      o = b4(data, ze + 48);
+  if (o == f8 || c == f4) {
+    let ze = b8(data, e - 12);
+    if (b4(data, ze) == 0x6064B50) {
+      c = b8(data, ze + 32);
+      o = b8(data, ze + 48);
     }
   }
   const fltr = opts && opts.filter;
   for (let i = 0; i < c; ++i) {
-    const [c, sc, su, fn, no, off] = zh(data, o, z), b = slzh(data, off);
+    const [c, sc, su, fn, no, off] = zh(data, o), b = slzh(data, off);
     o = no;
     if (!fltr || fltr({
       name: fn,
