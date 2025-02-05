@@ -32,7 +32,7 @@ zipSyncFn('should create valid zip file', async () => {
     'some.file': new Uint8Array([0xAA, 0xBB, 0xCC, 0xDD]),
   }, { mtime: new Date('2025-01-31T00:00:00'), level: 0 });
 
-  assert.equal(zipped, hexToBytes([
+  assertSnapshotOfBytes(zipped, [
     // local file header 1
     '504B0304', '1400', '0000', '0000', '0000', '3F5A', '87668EEB', '0B000000', '0B000000', '0900', '0000',
     '68656C6C6F2E747874', // file name
@@ -55,7 +55,7 @@ zipSyncFn('should create valid zip file', async () => {
 
     // end of central directory record
     '504B0506', '0000', '0000', '0200', '0200', '6E000000', '5D000000', '0000',
-  ]));
+  ]);
   await assertSuccessfulUnpack(zipped, UnzipPassThrough, {
     'hello.txt': strToU8('Hello there'),
     'some.file': new Uint8Array([0xAA, 0xBB, 0xCC, 0xDD]),
@@ -70,7 +70,7 @@ zipSyncFn('should add Zip64 EOCD data when standard EOCDR is not enough', () => 
 
   const data = zipSync(filesToZip, { level: 0 });
 
-  assert.equal(data.slice(-98), hexToBytes([
+  assertSnapshotOfBytes(data.slice(-98), [
     // Zip64 end of central directory record:
     '50 4B 06 06', // 0x06064b50
     '2C 00 00 00 00 00 00 00', // 44
@@ -96,7 +96,7 @@ zipSyncFn('should add Zip64 EOCD data when standard EOCDR is not enough', () => 
     'EA 4D 36 00', // central dir length
     'EA 36 25 00', // central dir position
     '00 00',
-  ]));
+  ]);
   assert.equal(data.slice(-58, -54), data.slice(-10, -6)); // central dir length
   assert.equal(data.slice(-50, -46), data.slice(-6, -2)); // central dir position
   assert.is(new DataView(data.slice(-34, -30).buffer).getUint32(0, true), data.length - 98); // Zip64 EOCDR position
@@ -137,7 +137,7 @@ zipFn('should create valid zip file', async () => {
     );
   });
 
-  assert.equal(zipped, hexToBytes([
+  assertSnapshotOfBytes(zipped, [
     // local file header 1
     '504B0304', '1400', '0000', '0000', '0000', '3F5A', '87668EEB', '0B000000', '0B000000', '0900', '0000',
     '68656C6C6F2E747874', // file name
@@ -160,7 +160,7 @@ zipFn('should create valid zip file', async () => {
 
     // end of central directory record
     '504B0506', '0000', '0000', '0200', '0200', '6E000000', '5D000000', '0000',
-  ]));
+  ]);
   await assertSuccessfulUnpack(zipped, UnzipPassThrough, {
     'hello.txt': strToU8('Hello there'),
     'some.file': new Uint8Array([0xAA, 0xBB, 0xCC, 0xDD]),
@@ -190,39 +190,42 @@ zipClass('should create valid zip file', async () => {
     const someFile = new ZipPassThrough('some.file');
     someFile.mtime = new Date('2025-01-31T00:00:00');
     zip.add(someFile);
-    someFile.push(new Uint8Array([0xAA, 0xBB, 0xCC, 0xDD]), true);
+    someFile.push(new Uint8Array([0xAA, 0xBB]));
+    someFile.push(new Uint8Array([0xCC, 0xDD]), true);
 
     zip.end();
   });
 
-  assert.equal(zipped, hexToBytes([
-    // local file header 1
-    '504B0304', '1400', '0800', '0000', '0000', '3F5A', '00000000', '00000000', '00000000', '0900', '0000',
+  assertSnapshotOfBytes(zipped, [
+    // local file header 1 <- this file was added in one go, [data descriptor 1] was NOT needed
+    '504B0304', '1400', /*->*/'0000', // <- bit 3 of the general purpose bit flag is NOT set
+    '0000', '0000', '3F5A', /*->*/'87668EEB', '0B000000', '0B000000', // crc-32, sc, su are defined
+    '0900', '0000',
     '68656C6C6F2E747874', // file name
     '48656C6C6F207468657265', // file data
-    // data descriptor 1
-    '504B0708', '87668EEB', '0B000000', '0B000000',
 
-    // local file header 2
-    '504B0304', '1400', '0800', '0000', '0000', '3F5A', '00000000', '00000000', '00000000', '0900', '0000',
+    // local file header 2 <- this file was added in 2 parts, [data descriptor 2] was needed
+    '504B0304', '1400', /*->*/'0800', // <- bit 3 of the general purpose bit flag is set
+    '0000', '0000', '3F5A', /*->*/'00000000', '00000000', '00000000', // <- crc-32, sc, su set to zeros
+    '0900', '0000',
     '736F6D652E66696C65', // file name
     'AABBCCDD', // file data
     // data descriptor 2
-    '504B0708', 'A701B455', '04000000', '04000000',
+    '504B0708', /*->*/'A701B455', '04000000', '04000000', // <- crc-32, sc, su are here
 
     // central directory header 1
-    '504B0102', '1400', '1400', '0800', '0000', '0000', '3F5A', '87668EEB', '0B000000', '0B000000',
+    '504B0102', '1400', '1400', '0000', '0000', '0000', '3F5A', '87668EEB', '0B000000', '0B000000',
     '0900', '0000', '0000', '0000', '0000', '00000000', '00000000',
     '68656C6C6F2E747874', // file name
 
     // central directory header 2
     '504B0102', '1400', '1400', '0800', '0000', '0000', '3F5A', 'A701B455', '04000000', '04000000',
-    '0900', '0000', '0000', '0000', '0000', '00000000', '42000000',
+    '0900', '0000', '0000', '0000', '0000', '00000000', '32000000',
     '736F6D652E66696C65', // file name
 
     // end of central directory record
-    '504B0506', '0000', '0000', '0200', '0200', '6E000000', '7D000000', '0000',
-  ]));
+    '504B0506', '0000', '0000', '0200', '0200', '6E000000', '6D000000', '0000',
+  ]);
   await assertSuccessfulUnpack(zipped, UnzipPassThrough, {
     'hello.txt': strToU8('Hello there'),
     'some.file': new Uint8Array([0xAA, 0xBB, 0xCC, 0xDD]),
@@ -240,59 +243,110 @@ zipClass('should add Zip64 Extra Field if one of the fields in file header is to
     };
 
     class BigFileMock extends ZipPassThrough {
-      zip64 = true;
+      originalSizeMock: number;
+      zip64?: boolean;
 
       protected process(chunk: Uint8Array, final: boolean) {
-        this.size = Math.floor(1024 * 1024 * 1024 * 8.3); // mock uncompressed size 8.3GB
+        this.size = this.originalSizeMock;
         this.ondata(null, chunk, final);
       }
     }
 
-    const bigFile = new BigFileMock('some-big-file');
-    bigFile.compression = 8;
-    bigFile.mtime = Date.parse('2025-01-31T04:00:00');
-    zip.add(bigFile);
-    bigFile.push(new Uint8Array([0xAA, 0xBB, 0xCC, 0xDD]), true);
+    const bf1 = new BigFileMock('big-1');
+    bf1.originalSizeMock = 1024 * 1024 * 1024 * 8.3; // 8.3GB
+    bf1.zip64 = true; // flag to work must be set before `zip.add(file)`
+    bf1.compression = 8;
+    bf1.os = 3;
+    bf1.attrs = 0o644 << 16;
+    bf1.mtime = Date.parse('2025-01-31T04:00:00');
+    zip.add(bf1);
+    bf1.push(new Uint8Array([0xAA, 0xBB, 0xCC]));
+    bf1.push(new Uint8Array([0xDD]), true); // added in chunks
 
-    const smallFile = new ZipPassThrough('small-file');
-    smallFile.mtime = Date.parse('2025-01-16T08:00:00');
-    zip.add(smallFile);
-    smallFile.push(new Uint8Array([0xCC, 0xBB, 0xAA]), true);
+    const bf2 = new BigFileMock('big-2');
+    bf2.originalSizeMock = 1024 * 1024 * 1024 * 5.2; // 5.2GB
+    bf2.compression = 8;
+    bf2.extra = { 0xABCD: new Uint8Array([0xBA, 0xBA]) };
+    bf2.mtime = Date.parse('2025-01-16T08:00:00');
+    zip.add(bf2);
+    bf2.push(new Uint8Array([0xEE, 0xEE, 0xEE]), true);  // added in one go
+
+    const bf3 = new BigFileMock('big-3');
+    bf3.originalSizeMock = 1024 * 1024 * 512; // 512MB
+    bf3.zip64 = true; // should be important only in [local file header 3]
+    bf3.compression = 8;
+    bf3.mtime = Date.parse('2025-01-16T12:00:00');
+    zip.add(bf3);
+    bf3.push(new Uint8Array([0x77, 0x77]));
+    bf3.push(new Uint8Array([0x77]), true);
+
+    const sf = new ZipPassThrough('small');
+    sf.zip64 = true; // should be ignored when it turns out Data Descriptor is not needed
+    sf.mtime = new Date('2025-01-01T16:00:00');
+    sf.comment = 'comment sample';
+    zip.add(sf);
+    sf.push(new Uint8Array([0xCC, 0xBB, 0xAA]), true);
 
     zip.end();
   });
 
-  assert.equal(zipped, hexToBytes([
+  assertSnapshotOfBytes(zipped, [
     // local file header 1
-    '504B0304', '1400', '0800', '0800', '0020', '3F5A', '00000000', '00000000', '00000000', '0D00', '0400',
-    '736F6D652D6269672D66696C65', // file name
-    '0100', '0000', // <- Zip64 extra field with zero fields - only to indicate that [data descriptor 1] is in Zip64 format
+    '504B0304', '1400', '0800', '0800', '0020', '3F5A', /*->*/'00000000', '00000000', '00000000'/*<-*/, '0500', '0400',
+    '6269672D31', // file name
+    '0100 0000', // <- Zip64 extra field with zero fields - only to indicate that [data descriptor 1] is in Zip64 format
     'AABBCCDD', // file data
     // data descriptor 1
     '504B0708', 'A701B455', '0400000000000000', '3333331302000000', // <- 8 bytes per size field!
 
     // local file header 2
-    '504B0304', '1400', '0800', '0000', '0040', '305A', '00000000', '00000000', '00000000', '0A00', '0000',
-    '736D616C6C2D66696C65', // file name
+    '504B0304', '1400', '0000', '0800', '0040', '305A', 'A53572DB', /*->*/'FFFFFFFF', 'FFFFFFFF'/*<-*/, '0500', '1A00',
+    '6269672D32', // file name
+    '0100 1000 CCCCCC4C01000000 0300000000000000', // <- Zip64 extra field with two fields
+    'CDAB 0200 BABA', // custom extra field
+    'EEEEEE', // file data
+
+    // local file header 3
+    '504B0304', '1400', '0800', '0800', '0060', '305A', /*->*/'00000000', '00000000', '00000000'/*<-*/, '0500', '0400',
+    '6269672D33', // file name
+    '0100 0000', // <- Zip64 extra field with zero fields, thanks to `zip64` flag
+    '777777', // file data
+    // data descriptor 3
+    '504B0708', '69ACE000', '0300000000000000', '0000002000000000',
+
+    // local file header 4
+    '504B0304', '1400', '0000', '0000', '0080', '215A', 'B38BC656', '03000000', '03000000', '0500', '0000',
+    '736D616C6C', // file name
     'CCBBAA', // file data
-    // data descriptor 2
-    '504B0708', 'B38BC656', '03000000', '03000000',
 
     // central directory header 1
-    '504B0102', '1400', '1400', '0800', '0800', '0020', '3F5A', 'A701B455', '04000000',
-    'FFFFFFFF', // <- standard field for uncompressed file size is set to 0xffffffff
-    '0D00', '0C00', '0000', '0000', '0000', '00000000', '00000000',
-    '736F6D652D6269672D66696C65', // file name
-    '0100', '0800', '3333331302000000', // <- Zip64 extra field with one field - uncompressed file size
+    '504B0102', '1403', '1400', '0800', '0800', '0020', '3F5A', 'A701B455', '04000000', /*->*/'FFFFFFFF'/*<-*/,
+    '0500', '0C00', '0000', '0000', '0000', '0000A401', '00000000',
+    '6269672D31', // file name
+    '0100 0800 3333331302000000', // <- Zip64 extra field with one field
 
     // central directory header 2
-    '504B0102', '1400', '1400', '0800', '0000', '0040', '305A', 'B38BC656', '03000000', '03000000',
-    '0A00', '0000', '0000', '0000', '0000', '00000000', '4B000000',
-    '736D616C6C2D66696C65', // file name
+    '504B0102', '1400', '1400', '0000', '0800', '0040', '305A', 'A53572DB', '03000000', /*->*/'FFFFFFFF'/*<-*/,
+    '0500', '1200', '0000', '0000', '0000', '00000000', '43000000',
+    '6269672D32',  // file name
+    '0100 0800 CCCCCC4C01000000', // <- Zip64 extra field with one field
+    'CDAB 0200 BABA', // custom extra field
+
+    // central directory header 3
+    '504B0102', '1400', '1400', '0800', '0800', '0060', '305A', '69ACE000', '03000000', '00000020',
+    '0500', '0000', '0000', '0000', '0000', '00000000', '83000000',
+    '6269672D33', // file name
+    // no need for Zip64 extra field
+
+    // central directory header 4
+    '504B0102', '1400', '1400', '0000', '0000', '0080', '215A', 'B38BC656', '03000000', '03000000',
+    '0500', '0000', '0E00', '0000', '0000', '00000000', 'C5000000',
+    '736D616C6C', // file name
+    '636F6D6D656E742073616D706C65', // file comment
 
     // end of central directory record
-    '504B0506', '0000', '0000', '0200', '0200', '7F000000', '86000000', '0000',
-  ]));
+    '504B0506', '0000', '0000', '0400', '0400', 'F8000000', 'EB000000', '0000',
+  ]);
 });
 
 zipClass.run();
@@ -331,8 +385,38 @@ unzipping('should unpack zip where some file has Zip64 Extra Field, but there is
   });
 });
 
+unzipping('should handle files with Data Descriptor in Zip64 format', async () => {
+  const zipped = hexToBytes([
+    '504B03041400080000000060215A000000000000000000000000020004006631',
+    '0100 0000', // Zip64 extra field with zero fields
+    '6C6F72656D20697073756D20646F6C6F7220736974',
+    '504B0708 38284BA5 1500000000000000 1500000000000000', // Data Descriptor 1 in Zip64 format
+    '504B03041400080000000070215A000000000000000000000000020000006632616D65742C20636F6E7365637465747572',
+    '504B0708 C82D7309 11000000 11000000', // Data Descriptor 2
+    '504B03041400000000000080215A000000000000000000000000020000006633',
+    '504B010214001400080000000060215A38284BA515000000150000000200000000000000000000000000000000006631',
+    '504B010214001400080000000070215AC82D730911000000110000000200000000000000000000000000510000006632',
+    '504B010214001400000000000080215A0000000000000000000000000200000005000000000000000000920000006633',
+    '68656C6C6F', // file 3 comment
+    '504B0506000000000300030095000000B20000000000',
+  ]);
+
+  await assertSuccessfulUnpack(zipped, UnzipPassThrough, {
+    'f1': strToU8('lorem ipsum dolor sit'),
+    'f2': strToU8('amet, consectetur'),
+    'f3': new Uint8Array(), // empty file
+  });
+});
+
 unzipping.run();
 
+
+function assertSnapshotOfBytes(actual: Uint8Array, expects: string | string[]) { // for better diff printing
+  assert.equal(
+    Array.from(actual, n => n.toString(16).toUpperCase().padStart(2, '0')).join(' '),
+    (Array.isArray(expects) ? expects.join('') : expects).replace(/\s/g, '').replace(/\S{2}(?!$)/g, '$& '),
+  );
+}
 
 function hexToBytes(hex: string | string[]) {
   const str = Array.isArray(hex) ? hex.join('') : hex;
